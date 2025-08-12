@@ -1,0 +1,71 @@
+--// Pet Size Changer for YOUR Pets Only
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
+
+-- SETTINGS
+local targetMultiplier = 3 -- Gaano kalaki (hal. 3 = triple size)
+local growTime = 2 -- ilang segundo bago maabot yung laki
+
+-- Function: Get your own pets only
+local function GetMyPets()
+    local myPets = {}
+    for _, obj in pairs(workspace:GetDescendants()) do
+        if obj:IsA("Model") and obj:FindFirstChild("Owner") and obj.Owner.Value == LocalPlayer.Name then
+            table.insert(myPets, obj)
+        end
+    end
+    return myPets
+end
+
+-- Function: Store original sizes
+local function StoreOriginalSizes(pet)
+    if not pet:FindFirstChild("OriginalSizes") then
+        local folder = Instance.new("Folder")
+        folder.Name = "OriginalSizes"
+        folder.Parent = pet
+        for _, part in pairs(pet:GetDescendants()) do
+            if part:IsA("BasePart") then
+                local sizeValue = Instance.new("Vector3Value")
+                sizeValue.Name = part.Name
+                sizeValue.Value = part.Size
+                sizeValue.Parent = folder
+            end
+        end
+    end
+end
+
+-- Function: Smoothly scale pet
+local function ScalePetSmooth(pet, multiplier)
+    local originalSizes = pet:FindFirstChild("OriginalSizes")
+    if not originalSizes then return end
+
+    local startTime = tick()
+    local startMultiplier = 1
+
+    RunService.RenderStepped:Connect(function()
+        local progress = math.min((tick() - startTime) / growTime, 1)
+        local currentMultiplier = startMultiplier + (multiplier - startMultiplier) * progress
+
+        for _, part in pairs(pet:GetDescendants()) do
+            if part:IsA("BasePart") then
+                local origSize = originalSizes:FindFirstChild(part.Name)
+                if origSize then
+                    part.Size = origSize.Value * currentMultiplier
+                end
+            end
+        end
+
+        if progress >= 1 then
+            return -- Done scaling
+        end
+    end)
+end
+
+-- MAIN
+for _, pet in pairs(GetMyPets()) do
+    StoreOriginalSizes(pet)
+    ScalePetSmooth(pet, targetMultiplier)
+end
+
+print("✅ Pets scaled successfully!")

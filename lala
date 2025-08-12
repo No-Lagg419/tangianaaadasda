@@ -1,102 +1,99 @@
---// PET HEIGHT CHANGER //--
+--// CONFIG
+local petName = "Inverted Dragonfly" -- pangalan ng equipped pet mo
 
--- Create ScreenGui
+--// GUI Creation
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "PetHeightChanger"
-ScreenGui.Parent = game.CoreGui
-
--- Main Frame
 local Frame = Instance.new("Frame")
-Frame.Size = UDim2.new(0, 300, 0, 180)
-Frame.Position = UDim2.new(0.5, -150, 0.5, -90)
-Frame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-Frame.BorderSizePixel = 0
-Frame.Active = true
-Frame.Draggable = true
+local TextBox = Instance.new("TextBox")
+local ApplyBtn = Instance.new("TextButton")
+local ResetBtn = Instance.new("TextButton")
+
+ScreenGui.Parent = game.Players.LocalPlayer:WaitForChild("PlayerGui")
+
+Frame.Size = UDim2.new(0, 200, 0, 150)
+Frame.Position = UDim2.new(1, -210, 0.3, 0)
+Frame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
 Frame.Parent = ScreenGui
 
--- Title
-local Title = Instance.new("TextLabel")
-Title.Size = UDim2.new(1, 0, 0, 30)
-Title.BackgroundTransparency = 1
-Title.Text = "PET HEIGHT CHANGER"
-Title.Font = Enum.Font.SourceSansBold
-Title.TextSize = 18
-Title.TextColor3 = Color3.fromRGB(255, 255, 255)
-Title.Parent = Frame
+TextBox.Size = UDim2.new(0, 180, 0, 30)
+TextBox.Position = UDim2.new(0, 10, 0, 10)
+TextBox.PlaceholderText = "Multiplier (e.g. 2)"
+TextBox.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+TextBox.Text = ""
+TextBox.Parent = Frame
 
--- TextBox for multiplier
-local Input = Instance.new("TextBox")
-Input.Size = UDim2.new(0.8, 0, 0, 30)
-Input.Position = UDim2.new(0.1, 0, 0.25, 0)
-Input.PlaceholderText = "Enter height multiplier"
-Input.Text = ""
-Input.Font = Enum.Font.SourceSans
-Input.TextSize = 16
-Input.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-Input.TextColor3 = Color3.fromRGB(255, 255, 255)
-Input.Parent = Frame
-
--- Apply Button
-local ApplyBtn = Instance.new("TextButton")
-ApplyBtn.Size = UDim2.new(0.8, 0, 0, 30)
-ApplyBtn.Position = UDim2.new(0.1, 0, 0.45, 0)
+ApplyBtn.Size = UDim2.new(0, 180, 0, 30)
+ApplyBtn.Position = UDim2.new(0, 10, 0, 50)
 ApplyBtn.Text = "Apply Pet Height"
-ApplyBtn.Font = Enum.Font.SourceSansBold
-ApplyBtn.TextSize = 16
 ApplyBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
-ApplyBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 ApplyBtn.Parent = Frame
 
--- Reset Button
-local ResetBtn = Instance.new("TextButton")
-ResetBtn.Size = UDim2.new(0.8, 0, 0, 30)
-ResetBtn.Position = UDim2.new(0.1, 0, 0.65, 0)
+ResetBtn.Size = UDim2.new(0, 180, 0, 30)
+ResetBtn.Position = UDim2.new(0, 10, 0, 90)
 ResetBtn.Text = "Reset to Normal"
-ResetBtn.Font = Enum.Font.SourceSansBold
-ResetBtn.TextSize = 16
 ResetBtn.BackgroundColor3 = Color3.fromRGB(170, 0, 0)
-ResetBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 ResetBtn.Parent = Frame
 
--- Store original sizes
-local originalSizes = {}
+--// Function to get pet
+local function getPet()
+    return workspace:WaitForChild("PetsPhysical"):FindFirstChild(petName)
+end
 
--- Function to scale pet height
-local function scalePetHeight(multiplier)
-    for _, pet in pairs(workspace:GetDescendants()) do
-        if pet:IsA("Model") and pet:FindFirstChild("HumanoidRootPart") then
-            if not originalSizes[pet] then
-                originalSizes[pet] = {}
-                for _, part in ipairs(pet:GetDescendants()) do
-                    if part:IsA("BasePart") then
-                        originalSizes[pet][part] = part.Size
-                    end
-                end
-            end
-            for _, part in ipairs(pet:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    local orig = originalSizes[pet][part]
-                    part.Size = Vector3.new(orig.X, orig.Y * multiplier, orig.Z)
-                end
+--// Store original sizes
+local originalSizes = {}
+local function saveOriginalSizes(pet)
+    for _, part in ipairs(pet:GetDescendants()) do
+        if part:IsA("BasePart") then
+            originalSizes[part] = part.Size
+        end
+    end
+end
+
+--// Smooth scale function
+local function smoothScale(pet, multiplier)
+    for _, part in ipairs(pet:GetDescendants()) do
+        if part:IsA("BasePart") and originalSizes[part] then
+            local startSize = part.Size
+            local targetSize = Vector3.new(
+                originalSizes[part].X,
+                originalSizes[part].Y * multiplier,
+                originalSizes[part].Z
+            )
+            for i = 0, 1, 0.1 do
+                part.Size = startSize:Lerp(targetSize, i)
+                task.wait(0.02)
             end
         end
     end
 end
 
--- Apply button click
+--// Apply button event
 ApplyBtn.MouseButton1Click:Connect(function()
-    local multiplier = tonumber(Input.Text)
-    if multiplier and multiplier > 0 then
-        scalePetHeight(multiplier)
-    end
-end)
-
--- Reset button click
-ResetBtn.MouseButton1Click:Connect(function()
-    for pet, parts in pairs(originalSizes) do
-        for part, origSize in pairs(parts) do
-            part.Size = origSize
+    local pet = getPet()
+    if pet and TextBox.Text ~= "" then
+        local mult = tonumber(TextBox.Text)
+        if mult then
+            smoothScale(pet, mult)
         end
     end
 end)
+
+--// Reset button event
+ResetBtn.MouseButton1Click:Connect(function()
+    local pet = getPet()
+    if pet then
+        for _, part in ipairs(pet:GetDescendants()) do
+            if part:IsA("BasePart") and originalSizes[part] then
+                part.Size = originalSizes[part]
+            end
+        end
+    end
+end)
+
+--// Initial save
+local pet = getPet()
+if pet then
+    saveOriginalSizes(pet)
+else
+    warn("Pet not found at start:", petName)
+end

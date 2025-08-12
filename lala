@@ -1,264 +1,102 @@
--- Instant Huge Pet Showcase (client-only)
--- Features: auto-detect held Tool, save originals once, instant proportional scaling, KG update, optional camera focus
--- Paste & run in executor (client). Equip your pet tool, set multiplier (1..10), press Apply.
+--// PET HEIGHT CHANGER //--
 
-local Players = game:GetService("Players")
-local TweenService = game:GetService("TweenService")
-local LocalPlayer = Players.LocalPlayer
-local CoreGui = game:GetService("CoreGui")
+-- Create ScreenGui
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "PetHeightChanger"
+ScreenGui.Parent = game.CoreGui
 
--- CONFIG
-local MAX_MULTIPLIER = 10
-local MIN_MULTIPLIER = 1
-local ENABLE_CAMERA_FOCUS = true    -- set false to skip camera zoom
-local CAMERA_FOCUS_TIME = 2         -- seconds to keep camera focused
-local CAMERA_DISTANCE_MULT = 4      -- camera offset scale (tweak if too near/far)
+-- Main Frame
+local Frame = Instance.new("Frame")
+Frame.Size = UDim2.new(0, 300, 0, 180)
+Frame.Position = UDim2.new(0.5, -150, 0.5, -90)
+Frame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+Frame.BorderSizePixel = 0
+Frame.Active = true
+Frame.Draggable = true
+Frame.Parent = ScreenGui
 
--- state
-local currentTool = nil
-local savedOriginals = {}   -- [tool] = { inst => data }
-local baseKGTable = {}      -- [tool] = baseKG
-local savedForTool = {}     -- mark tool instances we saved for
+-- Title
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 30)
+Title.BackgroundTransparency = 1
+Title.Text = "PET HEIGHT CHANGER"
+Title.Font = Enum.Font.SourceSansBold
+Title.TextSize = 18
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.Parent = Frame
 
-local function round2(n) return math.floor(n * 100 + 0.5) / 100 end
+-- TextBox for multiplier
+local Input = Instance.new("TextBox")
+Input.Size = UDim2.new(0.8, 0, 0, 30)
+Input.Position = UDim2.new(0.1, 0, 0.25, 0)
+Input.PlaceholderText = "Enter height multiplier"
+Input.Text = ""
+Input.Font = Enum.Font.SourceSans
+Input.TextSize = 16
+Input.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+Input.TextColor3 = Color3.fromRGB(255, 255, 255)
+Input.Parent = Frame
 
--- detect held tool (robust poll)
-local function detectHeldTool()
-    local char = LocalPlayer.Character
-    if not char then return nil end
-    local tool = char:FindFirstChildOfClass("Tool")
-    if tool and tool:FindFirstChild("Handle") then
-        return tool
-    end
-    return nil
-end
+-- Apply Button
+local ApplyBtn = Instance.new("TextButton")
+ApplyBtn.Size = UDim2.new(0.8, 0, 0, 30)
+ApplyBtn.Position = UDim2.new(0.1, 0, 0.45, 0)
+ApplyBtn.Text = "Apply Pet Height"
+ApplyBtn.Font = Enum.Font.SourceSansBold
+ApplyBtn.TextSize = 16
+ApplyBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
+ApplyBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ApplyBtn.Parent = Frame
 
--- save originals for a tool (only once per tool instance)
-local function saveToolOriginals(tool)
-    if not tool or savedForTool[tool] then return end
-    local originals = {}
-    local baseKG = nil
-    for _, obj in ipairs(tool:GetDescendants()) do
-        if obj:IsA("BasePart") and not obj:IsA("Terrain") then
-            originals[obj] = { kind = "BasePart", size = obj.Size }
-        elseif obj:IsA("MeshPart") then
-            originals[obj] = { kind = "MeshPart", size = obj.Size, meshScale = obj.Scale }
-        elseif obj:IsA("SpecialMesh") then
-            originals[obj] = { kind = "SpecialMesh", smScale = obj.Scale }
-        end
-        if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and not baseKG then
-            local txt = tostring(obj.Text)
-            local num = string.match(txt, "([%d%.]+)%s*[Kk][Gg]")
-            if num then baseKG = tonumber(num) end
-        end
-    end
-    if not baseKG then baseKG = 1.0 end
-    savedOriginals[tool] = originals
-    baseKGTable[tool] = baseKG
-    savedForTool[tool] = true
-end
+-- Reset Button
+local ResetBtn = Instance.new("TextButton")
+ResetBtn.Size = UDim2.new(0.8, 0, 0, 30)
+ResetBtn.Position = UDim2.new(0.1, 0, 0.65, 0)
+ResetBtn.Text = "Reset to Normal"
+ResetBtn.Font = Enum.Font.SourceSansBold
+ResetBtn.TextSize = 16
+ResetBtn.BackgroundColor3 = Color3.fromRGB(170, 0, 0)
+ResetBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ResetBtn.Parent = Frame
 
--- compute KG by approx volume (mult^3)
-local function computeKG(tool, mult)
-    local base = baseKGTable[tool] or 1.0
-    return round2(base * (mult ^ 3))
-end
+-- Store original sizes
+local originalSizes = {}
 
--- apply instant proportional scale (no stacking) - uses saved originals
-local function applyInstantScale(tool, mult)
-    if not tool or not savedOriginals[tool] then return end
-    mult = math.clamp(mult, MIN_MULTIPLIER, MAX_MULTIPLIER)
-
-    local originals = savedOriginals[tool]
-    -- set sizes/scales directly from originals
-    for inst, data in pairs(originals) do
-        if not inst.Parent then
-            -- part removed; skip
-        else
-            if data.kind == "BasePart" then
-                inst.Size = data.size * mult
-            elseif data.kind == "MeshPart" then
-                if data.meshScale then
-                    -- preserve meshScale if exists
-                    inst.Scale = data.meshScale * mult
-                else
-                    inst.Size = data.size * mult
+-- Function to scale pet height
+local function scalePetHeight(multiplier)
+    for _, pet in pairs(workspace:GetDescendants()) do
+        if pet:IsA("Model") and pet:FindFirstChild("HumanoidRootPart") then
+            if not originalSizes[pet] then
+                originalSizes[pet] = {}
+                for _, part in ipairs(pet:GetDescendants()) do
+                    if part:IsA("BasePart") then
+                        originalSizes[pet][part] = part.Size
+                    end
                 end
-            elseif data.kind == "SpecialMesh" then
-                inst.Scale = data.smScale * mult
+            end
+            for _, part in ipairs(pet:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    local orig = originalSizes[pet][part]
+                    part.Size = Vector3.new(orig.X, orig.Y * multiplier, orig.Z)
+                end
             end
         end
     end
-
-    -- update KG text inside tool if present
-    local newkg = computeKG(tool, mult)
-    for _, obj in ipairs(tool:GetDescendants()) do
-        if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and string.find(tostring(obj.Text), "KG") then
-            obj.Text = tostring(newkg) .. " KG"
-        end
-    end
 end
 
--- camera focus: briefly move camera to showcase the pet (client only)
-local function focusCameraOnTool(tool, mult, duration)
-    if not ENABLE_CAMERA_FOCUS or not tool then return end
-    local primary = tool.PrimaryPart
-    if not primary then return end
-    local cam = workspace.CurrentCamera
-    if not cam then return end
-
-    -- remember original camera state
-    local oldType = cam.CameraType
-    local oldCFrame = cam.CFrame
-
-    -- compute offset based on pet size
-    local up = Vector3.new(0, 1, 0)
-    local forwardOffset = (primary.Size.Magnitude + (mult * CAMERA_DISTANCE_MULT)) * 1.2
-    local upOffset = math.max(primary.Size.Y * mult * 0.5, 3)
-
-    local targetCFrame = primary.CFrame * CFrame.new(0, upOffset, forwardOffset) * CFrame.Angles(-0.4, math.rad(180), 0)
-
-    -- tween camera to target
-    pcall(function()
-        cam.CameraType = Enum.CameraType.Scriptable
-        local tween = TweenService:Create(cam, TweenInfo.new(0.25, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {CFrame = targetCFrame})
-        tween:Play()
-    end)
-
-    -- wait, then restore
-    task.delay(duration or CAMERA_FOCUS_TIME, function()
-        pcall(function()
-            local tweenBack = TweenService:Create(cam, TweenInfo.new(0.3, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {CFrame = oldCFrame})
-            tweenBack:Play()
-            task.wait(0.35)
-            cam.CameraType = oldType
-        end)
-    end)
-end
-
--- GUI (CoreGui parent for executor compatibility)
-local function makeGUI()
-    -- remove old
-    local existing = CoreGui:FindFirstChild("InstantHugePetGUI")
-    if existing then existing:Destroy() end
-
-    local gui = Instance.new("ScreenGui")
-    gui.Name = "InstantHugePetGUI"
-    gui.Parent = CoreGui
-    gui.ResetOnSpawn = false
-
-    local frame = Instance.new("Frame", gui)
-    frame.Size = UDim2.new(0, 300, 0, 140)
-    frame.Position = UDim2.new(1, -320, 0.5, -70)
-    frame.BackgroundColor3 = Color3.fromRGB(25,25,25)
-    frame.BorderSizePixel = 0
-    frame.Active = true
-    frame.Draggable = true
-    local corner = Instance.new("UICorner", frame); corner.CornerRadius = UDim.new(0,8)
-
-    local title = Instance.new("TextLabel", frame)
-    title.Size = UDim2.new(1,0,0,36)
-    title.Position = UDim2.new(0,0,0,0)
-    title.BackgroundTransparency = 1
-    title.Text = "PET KG SHOWCASE"
-    title.Font = Enum.Font.GothamBold
-    title.TextSize = 18
-    title.TextColor3 = Color3.fromRGB(255,255,255)
-
-    local hint = Instance.new("TextLabel", frame)
-    hint.Size = UDim2.new(1,-20,0,18)
-    hint.Position = UDim2.new(0,10,0,38)
-    hint.BackgroundTransparency = 1
-    hint.Text = "Equip pet → set multiplier (1-10) → Apply"
-    hint.Font = Enum.Font.Gotham
-    hint.TextSize = 12
-    hint.TextColor3 = Color3.fromRGB(190,190,190)
-    hint.TextXAlignment = Enum.TextXAlignment.Left
-
-    local input = Instance.new("TextBox", frame)
-    input.Size = UDim2.new(0.5,0,0,28)
-    input.Position = UDim2.new(0,10,0,62)
-    input.PlaceholderText = "Multiplier (ex: 5)"
-    input.ClearTextOnFocus = false
-    input.BackgroundColor3 = Color3.fromRGB(45,45,45)
-    input.TextColor3 = Color3.fromRGB(255,255,255)
-    input.Font = Enum.Font.Gotham
-    input.TextSize = 14
-
-    local apply = Instance.new("TextButton", frame)
-    apply.Size = UDim2.new(0.36,0,0,28)
-    apply.Position = UDim2.new(0.64, -6, 0, 62)
-    apply.Text = "Apply"
-    apply.Font = Enum.Font.GothamBold
-    apply.TextSize = 14
-    apply.BackgroundColor3 = Color3.fromRGB(70,130,180)
-    apply.TextColor3 = Color3.fromRGB(255,255,255)
-
-    -- loading bar BG + fill
-    local loadBG = Instance.new("Frame", frame)
-    loadBG.Size = UDim2.new(0.9,0,0,8)
-    loadBG.Position = UDim2.new(0.05,0,0,100)
-    loadBG.BackgroundColor3 = Color3.fromRGB(60,60,60)
-    local loadFill = Instance.new("Frame", loadBG)
-    loadFill.Size = UDim2.new(0,0,1,0)
-    loadFill.BackgroundColor3 = Color3.fromRGB(0,200,120)
-
-    local kgLabel = Instance.new("TextLabel", frame)
-    kgLabel.Size = UDim2.new(1,-20,0,18)
-    kgLabel.Position = UDim2.new(0,10,0,82)
-    kgLabel.BackgroundTransparency = 1
-    kgLabel.Text = "KG: 1.00"
-    kgLabel.Font = Enum.Font.Gotham
-    kgLabel.TextSize = 14
-    kgLabel.TextColor3 = Color3.fromRGB(220,220,220)
-    kgLabel.TextXAlignment = Enum.TextXAlignment.Left
-
-    -- click apply behavior
-    apply.MouseButton1Click:Connect(function()
-        local tool = detectHeldTool()
-        if not tool then
-            hint.Text = "No pet equipped"
-            return
-        end
-        -- ensure originals saved
-        saveToolOriginals(tool)
-        local mult = tonumber(input.Text)
-        if not mult then
-            hint.Text = "Enter a number 1-10"
-            return
-        end
-        mult = math.clamp(mult, MIN_MULTIPLIER, MAX_MULTIPLIER)
-        -- loading animation quick
-        local steps = 30
-        for i=1,steps do
-            loadFill.Size = UDim2.new(i/steps,0,1,0)
-            task.wait(0.015)
-        end
-        -- apply instantly (from originals) then camera focus
-        applyInstantScale(tool, mult)
-        kgLabel.Text = "KG: " .. tostring(computeKG(tool, mult))
-        updateKGText(tool, computeKG(tool, mult))
-        if ENABLE_CAMERA_FOCUS then
-            focusCameraOnTool(tool, mult, CAMERA_FOCUS_TIME)
-        end
-    end)
-
-    return gui
-end
-
--- create GUI
-local gui = makeGUI()
-
--- auto-detect loop to pre-save if equip
-task.spawn(function()
-    while true do
-        local t = detectHeldTool()
-        if t and not savedForTool[t] then
-            saveToolOriginals(t)
-        end
-        task.wait(0.7)
+-- Apply button click
+ApplyBtn.MouseButton1Click:Connect(function()
+    local multiplier = tonumber(Input.Text)
+    if multiplier and multiplier > 0 then
+        scalePetHeight(multiplier)
     end
 end)
 
--- done
-print("Pet KG Showcase script loaded. Equip pet and use GUI (right-center).")
+-- Reset button click
+ResetBtn.MouseButton1Click:Connect(function()
+    for pet, parts in pairs(originalSizes) do
+        for part, origSize in pairs(parts) do
+            part.Size = origSize
+        end
+    end
+end)

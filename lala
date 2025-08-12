@@ -1,73 +1,97 @@
--- Universal Robust Pet Scaler (Client-side visual only)
--- Features:
---  - GUI injected to CoreGui (visibility across executors)
---  - Auto-detect held Tool (pet) in Character
---  - Save original sizes/scales once per detected tool (prevents stacking/bloating)
---  - Proportional scaling (uses original values) with TweenService smoothing
---  - Slider (1x-10x), manual input, loading bar before GUI shows
---  - Updates KG text found inside the pet model based on volume ~ multiplier^3
---  - Paste & run in executor (client). Equip pet, then use GUI.
+-- Instant Huge Pet Showcase (client-only)
+-- Features: auto-detect held Tool, save originals once, instant proportional scaling, KG update, optional camera focus
+-- Paste & run in executor (client). Equip your pet tool, set multiplier (1..10), press Apply.
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
-local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
-
 local LocalPlayer = Players.LocalPlayer
-local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
-local coreGui = game:GetService("CoreGui")
+local CoreGui = game:GetService("CoreGui")
 
--- STATE
+-- CONFIG
+local MAX_MULTIPLIER = 10
+local MIN_MULTIPLIER = 1
+local ENABLE_CAMERA_FOCUS = true    -- set false to skip camera zoom
+local CAMERA_FOCUS_TIME = 2         -- seconds to keep camera focused
+local CAMERA_DISTANCE_MULT = 4      -- camera offset scale (tweak if too near/far)
+
+-- state
 local currentTool = nil
-local originals = {}      -- [instance] = { kind="BasePart"/"MeshPart"/"SpecialMesh", size=Vector3, meshScale=Vector3, smScale=Vector3 }
-local baseKG = 1.0
-local savedForTool = {}   -- keep track to avoid re-saving repeatedly
+local savedOriginals = {}   -- [tool] = { inst => data }
+local baseKGTable = {}      -- [tool] = baseKG
+local savedForTool = {}     -- mark tool instances we saved for
 
 local function round2(n) return math.floor(n * 100 + 0.5) / 100 end
 
--- Save original geometry for a tool (only once per tool instance)
-local function saveOriginals(tool)
-    originals = {}
-    baseKG = nil
-    if not tool then return end
+-- detect held tool (robust poll)
+local function detectHeldTool()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local tool = char:FindFirstChildOfClass("Tool")
+    if tool and tool:FindFirstChild("Handle") then
+        return tool
+    end
+    return nil
+end
 
+-- save originals for a tool (only once per tool instance)
+local function saveToolOriginals(tool)
+    if not tool or savedForTool[tool] then return end
+    local originals = {}
+    local baseKG = nil
     for _, obj in ipairs(tool:GetDescendants()) do
-        -- BasePart (generic)
         if obj:IsA("BasePart") and not obj:IsA("Terrain") then
             originals[obj] = { kind = "BasePart", size = obj.Size }
-        end
-
-        -- MeshPart (has Size and Scale)
-        if obj:IsA("MeshPart") then
+        elseif obj:IsA("MeshPart") then
             originals[obj] = { kind = "MeshPart", size = obj.Size, meshScale = obj.Scale }
-        end
-
-        -- SpecialMesh (attached to BasePart)
-        if obj:IsA("SpecialMesh") then
+        elseif obj:IsA("SpecialMesh") then
             originals[obj] = { kind = "SpecialMesh", smScale = obj.Scale }
         end
-
-        -- detect KG text if any (first one)
         if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and not baseKG then
             local txt = tostring(obj.Text)
             local num = string.match(txt, "([%d%.]+)%s*[Kk][Gg]")
-            if num then
-                baseKG = tonumber(num)
+            if num then baseKG = tonumber(num) end
+        end
+    end
+    if not baseKG then baseKG = 1.0 end
+    savedOriginals[tool] = originals
+    baseKGTable[tool] = baseKG
+    savedForTool[tool] = true
+end
+
+-- compute KG by approx volume (mult^3)
+local function computeKG(tool, mult)
+    local base = baseKGTable[tool] or 1.0
+    return round2(base * (mult ^ 3))
+end
+
+-- apply instant proportional scale (no stacking) - uses saved originals
+local function applyInstantScale(tool, mult)
+    if not tool or not savedOriginals[tool] then return end
+    mult = math.clamp(mult, MIN_MULTIPLIER, MAX_MULTIPLIER)
+
+    local originals = savedOriginals[tool]
+    -- set sizes/scales directly from originals
+    for inst, data in pairs(originals) do
+        if not inst.Parent then
+            -- part removed; skip
+        else
+            if data.kind == "BasePart" then
+                inst.Size = data.size * mult
+            elseif data.kind == "MeshPart" then
+                if data.meshScale then
+                    -- preserve meshScale if exists
+                    inst.Scale = data.meshScale * mult
+                else
+                    inst.Size = data.size * mult
+                end
+            elseif data.kind == "SpecialMesh" then
+                inst.Scale = data.smScale * mult
             end
         end
     end
 
-    if not baseKG then baseKG = 1.0 end
-end
-
--- Compute KG by approximate volume scaling (mult^3)
-local function computeKG(mult)
-    return round2((baseKG or 1.0) * (mult ^ 3))
-end
-
--- Update KG text inside tool/pet (only strings containing "KG")
-local function updateKGText(tool, newkg)
-    if not tool then return end
+    -- update KG text inside tool if present
+    local newkg = computeKG(tool, mult)
     for _, obj in ipairs(tool:GetDescendants()) do
         if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and string.find(tostring(obj.Text), "KG") then
             obj.Text = tostring(newkg) .. " KG"
@@ -75,103 +99,58 @@ local function updateKGText(tool, newkg)
     end
 end
 
--- Apply scaling proportionally using TweenService per-instance (smooth)
-local function applyScaleWithTween(tool, multiplier, tweenTime)
-    if not tool or not next(originals) then return end
-    tweenTime = tweenTime or 0.25
-
+-- camera focus: briefly move camera to showcase the pet (client only)
+local function focusCameraOnTool(tool, mult, duration)
+    if not ENABLE_CAMERA_FOCUS or not tool then return end
     local primary = tool.PrimaryPart
-    local savedCFrame
-    if primary then savedCFrame = primary.CFrame end
+    if not primary then return end
+    local cam = workspace.CurrentCamera
+    if not cam then return end
 
-    -- create tweens for each instance
-    local tweens = {}
-    for inst, data in pairs(originals) do
-        if inst and inst.Parent then
-            if data.kind == "BasePart" then
-                local target = data.size * multiplier
-                local success, err = pcall(function()
-                    table.insert(tweens, TweenService:Create(inst, TweenInfo.new(tweenTime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = target}))
-                end)
-            elseif data.kind == "MeshPart" then
-                -- prefer tweening Scale if present
-                if data.meshScale then
-                    local targetScale = data.meshScale * multiplier
-                    pcall(function()
-                        table.insert(tweens, TweenService:Create(inst, TweenInfo.new(tweenTime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Scale = targetScale}))
-                    end)
-                else
-                    local target = data.size * multiplier
-                    pcall(function()
-                        table.insert(tweens, TweenService:Create(inst, TweenInfo.new(tweenTime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = target}))
-                    end)
-                end
-            elseif data.kind == "SpecialMesh" then
-                local targetScale = data.smScale * multiplier
-                pcall(function()
-                    table.insert(tweens, TweenService:Create(inst, TweenInfo.new(tweenTime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Scale = targetScale}))
-                end)
-            end
-        end
-    end
+    -- remember original camera state
+    local oldType = cam.CameraType
+    local oldCFrame = cam.CFrame
 
-    -- play all tweens
-    for _, t in ipairs(tweens) do
-        pcall(function() t:Play() end)
-    end
+    -- compute offset based on pet size
+    local up = Vector3.new(0, 1, 0)
+    local forwardOffset = (primary.Size.Magnitude + (mult * CAMERA_DISTANCE_MULT)) * 1.2
+    local upOffset = math.max(primary.Size.Y * mult * 0.5, 3)
 
-    -- wait for tween completion (safe wait)
-    task.wait(tweenTime + 0.03)
+    local targetCFrame = primary.CFrame * CFrame.new(0, upOffset, forwardOffset) * CFrame.Angles(-0.4, math.rad(180), 0)
 
-    -- restore primary CFrame to avoid drift if possible
-    if primary and primary.Parent and savedCFrame then
-        pcall(function() tool:SetPrimaryPartCFrame(savedCFrame) end)
-    end
+    -- tween camera to target
+    pcall(function()
+        cam.CameraType = Enum.CameraType.Scriptable
+        local tween = TweenService:Create(cam, TweenInfo.new(0.25, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {CFrame = targetCFrame})
+        tween:Play()
+    end)
+
+    -- wait, then restore
+    task.delay(duration or CAMERA_FOCUS_TIME, function()
+        pcall(function()
+            local tweenBack = TweenService:Create(cam, TweenInfo.new(0.3, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {CFrame = oldCFrame})
+            tweenBack:Play()
+            task.wait(0.35)
+            cam.CameraType = oldType
+        end)
+    end)
 end
 
--- Detect held tool (Tool in Character). Save originals once per tool instance.
-local function detectHeldTool()
-    local char = LocalPlayer.Character
-    if not char then return nil end
-    local tool = char:FindFirstChildOfClass("Tool")
-    if tool and tool:FindFirstChild("Handle") then
-        if currentTool ~= tool then
-            currentTool = tool
-            -- save originals only once (avoid re-saving after transforms)
-            if not savedForTool[tool] then
-                saveOriginals(tool)
-                savedForTool[tool] = true
-            end
-        end
-    else
-        currentTool = nil
-    end
-    return currentTool
-end
-
--- Polling detect (robust)
-task.spawn(function()
-    while true do
-        pcall(detectHeldTool)
-        task.wait(0.7)
-    end
-end)
-
--- ---------- GUI (CoreGui parent so visible across executors) ----------
-local function createGUI()
-    -- clean old GUI
-    local existing = coreGui:FindFirstChild("RobustPetScalerCore")
+-- GUI (CoreGui parent for executor compatibility)
+local function makeGUI()
+    -- remove old
+    local existing = CoreGui:FindFirstChild("InstantHugePetGUI")
     if existing then existing:Destroy() end
 
     local gui = Instance.new("ScreenGui")
-    gui.Name = "RobustPetScalerCore"
-    gui.Parent = coreGui
+    gui.Name = "InstantHugePetGUI"
+    gui.Parent = CoreGui
     gui.ResetOnSpawn = false
 
     local frame = Instance.new("Frame", gui)
-    frame.Size = UDim2.new(0, 340, 0, 160)
-    frame.Position = UDim2.new(1, -360, 0.5, -80) -- right-center
-    frame.BackgroundColor3 = Color3.fromRGB(28,28,28)
+    frame.Size = UDim2.new(0, 300, 0, 140)
+    frame.Position = UDim2.new(1, -320, 0.5, -70)
+    frame.BackgroundColor3 = Color3.fromRGB(25,25,25)
     frame.BorderSizePixel = 0
     frame.Active = true
     frame.Draggable = true
@@ -181,238 +160,105 @@ local function createGUI()
     title.Size = UDim2.new(1,0,0,36)
     title.Position = UDim2.new(0,0,0,0)
     title.BackgroundTransparency = 1
-    title.Text = "PET KG CHANGER"
+    title.Text = "PET KG SHOWCASE"
     title.Font = Enum.Font.GothamBold
     title.TextSize = 18
     title.TextColor3 = Color3.fromRGB(255,255,255)
 
-    local help = Instance.new("TextLabel", frame)
-    help.Size = UDim2.new(1,-20,0,18)
-    help.Position = UDim2.new(0,10,0,40)
-    help.BackgroundTransparency = 1
-    help.Text = "Equip your pet tool, then use slider or type multiplier (1-10)."
-    help.Font = Enum.Font.Gotham
-    help.TextSize = 12
-    help.TextColor3 = Color3.fromRGB(190,190,190)
-    help.TextXAlignment = Enum.TextXAlignment.Left
+    local hint = Instance.new("TextLabel", frame)
+    hint.Size = UDim2.new(1,-20,0,18)
+    hint.Position = UDim2.new(0,10,0,38)
+    hint.BackgroundTransparency = 1
+    hint.Text = "Equip pet → set multiplier (1-10) → Apply"
+    hint.Font = Enum.Font.Gotham
+    hint.TextSize = 12
+    hint.TextColor3 = Color3.fromRGB(190,190,190)
+    hint.TextXAlignment = Enum.TextXAlignment.Left
 
-    -- Loading bar area (show at start)
+    local input = Instance.new("TextBox", frame)
+    input.Size = UDim2.new(0.5,0,0,28)
+    input.Position = UDim2.new(0,10,0,62)
+    input.PlaceholderText = "Multiplier (ex: 5)"
+    input.ClearTextOnFocus = false
+    input.BackgroundColor3 = Color3.fromRGB(45,45,45)
+    input.TextColor3 = Color3.fromRGB(255,255,255)
+    input.Font = Enum.Font.Gotham
+    input.TextSize = 14
+
+    local apply = Instance.new("TextButton", frame)
+    apply.Size = UDim2.new(0.36,0,0,28)
+    apply.Position = UDim2.new(0.64, -6, 0, 62)
+    apply.Text = "Apply"
+    apply.Font = Enum.Font.GothamBold
+    apply.TextSize = 14
+    apply.BackgroundColor3 = Color3.fromRGB(70,130,180)
+    apply.TextColor3 = Color3.fromRGB(255,255,255)
+
+    -- loading bar BG + fill
     local loadBG = Instance.new("Frame", frame)
     loadBG.Size = UDim2.new(0.9,0,0,8)
-    loadBG.Position = UDim2.new(0.05,0,0,64)
+    loadBG.Position = UDim2.new(0.05,0,0,100)
     loadBG.BackgroundColor3 = Color3.fromRGB(60,60,60)
     local loadFill = Instance.new("Frame", loadBG)
     loadFill.Size = UDim2.new(0,0,1,0)
-    loadFill.BackgroundColor3 = Color3.fromRGB(0,160,255)
-    local loadLabel = Instance.new("TextLabel", frame)
-    loadLabel.Size = UDim2.new(1,0,0,18)
-    loadLabel.Position = UDim2.new(0,0,0,74)
-    loadLabel.BackgroundTransparency = 1
-    loadLabel.Text = "Initializing..."
-    loadLabel.TextColor3 = Color3.fromRGB(200,200,200)
-    loadLabel.Font = Enum.Font.Gotham
-    loadLabel.TextSize = 12
+    loadFill.BackgroundColor3 = Color3.fromRGB(0,200,120)
 
-    -- slider label
-    local sliderLabel = Instance.new("TextLabel", frame)
-    sliderLabel.Size = UDim2.new(1,-20,0,20)
-    sliderLabel.Position = UDim2.new(0,10,0,94)
-    sliderLabel.BackgroundTransparency = 1
-    sliderLabel.Text = "Size: 1.00x"
-    sliderLabel.TextColor3 = Color3.fromRGB(220,220,220)
-    sliderLabel.Font = Enum.Font.Gotham
-    sliderLabel.TextXAlignment = Enum.TextXAlignment.Left
-
-    -- slider track
-    local track = Instance.new("Frame", frame)
-    track.Size = UDim2.new(1, -40, 0, 18)
-    track.Position = UDim2.new(0,20,0,118)
-    track.BackgroundColor3 = Color3.fromRGB(70,70,70)
-    local trackCorner = Instance.new("UICorner", track); trackCorner.CornerRadius = UDim.new(0,8)
-
-    local knob = Instance.new("ImageButton", track)
-    knob.Size = UDim2.new(0,18,1,0)
-    knob.Position = UDim2.new(0,0,0,0)
-    knob.BackgroundColor3 = Color3.fromRGB(0,160,255)
-    knob.AutoButtonColor = false
-    local knobCorner = Instance.new("UICorner", knob); knobCorner.CornerRadius = UDim.new(0,9)
-
-    local minLabel = Instance.new("TextLabel", frame)
-    minLabel.Size = UDim2.new(0,30,0,14)
-    minLabel.Position = UDim2.new(0,22,0,138)
-    minLabel.BackgroundTransparency = 1
-    minLabel.Text = "1x"
-    minLabel.Font = Enum.Font.Gotham
-    minLabel.TextSize = 12
-    minLabel.TextColor3 = Color3.fromRGB(180,180,180)
-
-    local maxLabel = Instance.new("TextLabel", frame)
-    maxLabel.Size = UDim2.new(0,40,0,14)
-    maxLabel.Position = UDim2.new(1,-62,0,138)
-    maxLabel.BackgroundTransparency = 1
-    maxLabel.Text = "10x"
-    maxLabel.Font = Enum.Font.Gotham
-    maxLabel.TextSize = 12
-    maxLabel.TextColor3 = Color3.fromRGB(180,180,180)
-
-    -- KG display
     local kgLabel = Instance.new("TextLabel", frame)
-    kgLabel.Size = UDim2.new(1,-20,0,20)
-    kgLabel.Position = UDim2.new(0,10,0,40)
+    kgLabel.Size = UDim2.new(1,-20,0,18)
+    kgLabel.Position = UDim2.new(0,10,0,82)
     kgLabel.BackgroundTransparency = 1
     kgLabel.Text = "KG: 1.00"
     kgLabel.Font = Enum.Font.Gotham
+    kgLabel.TextSize = 14
     kgLabel.TextColor3 = Color3.fromRGB(220,220,220)
     kgLabel.TextXAlignment = Enum.TextXAlignment.Left
 
-    -- manual number input (small)
-    local numBox = Instance.new("TextBox", frame)
-    numBox.Size = UDim2.new(0,80,0,26)
-    numBox.Position = UDim2.new(0,10,0,40)
-    numBox.Visible = false -- hidden (can be shown by double-click later)
-    numBox.PlaceholderText = "1-10"
-    numBox.ClearTextOnFocus = false
-    numBox.BackgroundColor3 = Color3.fromRGB(50,50,50)
-    numBox.TextColor3 = Color3.fromRGB(255,255,255)
-    numBox.Font = Enum.Font.Gotham
-    numBox.TextSize = 14
-
-    -- prepare sizes
-    local trackAbs, knobHalf, minX, maxX
-    local function updateSizes()
-        trackAbs = track.AbsoluteSize.X
-        knobHalf = knob.AbsoluteSize.X / 2
-        minX = 0
-        maxX = math.max(0, trackAbs - knob.AbsoluteSize.X)
-    end
-    track:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateSizes)
-    knob:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateSizes)
-    task.spawn(function() task.wait(0.05); updateSizes() end)
-
-    -- helper mapping pos <-> multiplier
-    local function posToMult(x)
-        local t = 0
-        if maxX > 0 then t = math.clamp(x / maxX, 0, 1) end
-        local mult = 1 + t * 9 -- 1..10
-        return math.clamp(mult, 1, 10)
-    end
-    local function multToPos(m)
-        local t = (m - 1) / 9
-        return t * maxX
-    end
-
-    -- initial loading animation then hide loading UI
-    task.spawn(function()
-        local steps = 40
-        for i = 1, steps do
-            local p = i / steps
-            loadFill.Size = UDim2.new(p, 0, 1, 0)
-            loadLabel.Text = "Initializing... " .. tostring(math.floor(p * 100)) .. "%"
-            task.wait(0.02)
+    -- click apply behavior
+    apply.MouseButton1Click:Connect(function()
+        local tool = detectHeldTool()
+        if not tool then
+            hint.Text = "No pet equipped"
+            return
         end
-        loadBG.Visible = false
-        loadLabel.Visible = false
-        -- update kgLabel and detect held tool now
-        detectHeldTool()
-        if currentTool then
-            kgLabel.Text = "KG: " .. tostring(round2(baseKG or 1.0))
-        else
-            kgLabel.Text = "KG: 1.00"
+        -- ensure originals saved
+        saveToolOriginals(tool)
+        local mult = tonumber(input.Text)
+        if not mult then
+            hint.Text = "Enter a number 1-10"
+            return
         end
-    end)
-
-    -- dragging logic
-    local dragging = false
-    knob.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
+        mult = math.clamp(mult, MIN_MULTIPLIER, MAX_MULTIPLIER)
+        -- loading animation quick
+        local steps = 30
+        for i=1,steps do
+            loadFill.Size = UDim2.new(i/steps,0,1,0)
+            task.wait(0.015)
         end
-    end)
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = false
-        end
-    end)
-    UserInputService.InputChanged:Connect(function(input)
-        if not dragging then return end
-        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-            local mouseX = input.Position.X
-            local trackX = track.AbsolutePosition.X
-            local localX = mouseX - trackX - (knob.AbsoluteSize.X / 2)
-            localX = math.clamp(localX, minX, maxX)
-            knob.Position = UDim2.new(0, localX, 0, 0)
-            local mult = posToMult(localX)
-            sliderLabel.Text = string.format("Size: %.2fx", mult)
-            kgLabel.Text = "KG: " .. tostring(computeKG(mult))
-            -- apply immediate smooth tween
-            applyScaleWithTween(currentTool, mult, 0.18)
-            updateKGText(currentTool, computeKG(mult))
-        end
-    end)
-
-    -- click on track jump
-    track.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            local localX = input.Position.X - track.AbsolutePosition.X - (knob.AbsoluteSize.X / 2)
-            localX = math.clamp(localX, minX, maxX)
-            knob.Position = UDim2.new(0, localX, 0, 0)
-            local mult = posToMult(localX)
-            sliderLabel.Text = string.format("Size: %.2fx", mult)
-            kgLabel.Text = "KG: " .. tostring(computeKG(mult))
-            applyScaleWithTween(currentTool, mult, 0.22)
-            updateKGText(currentTool, computeKG(mult))
-        end
-    end)
-
-    -- manual numeric entry via double-right-click title
-    title.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton2 then
-            if numBox.Parent then numBox.Parent = nil end
-            numBox.Text = ""
-            numBox.Parent = frame
-            numBox.Position = UDim2.new(0.5, -40, 0, 40)
-            numBox.FocusLost:Connect(function()
-                local v = tonumber(numBox.Text)
-                if v then
-                    v = math.clamp(v, 1, 10)
-                    applyScaleWithTween(currentTool, v, 0.25)
-                    sliderLabel.Text = string.format("Size: %.2fx", v)
-                    knob.Position = UDim2.new(0, multToPos(v), 0, 0)
-                    kgLabel.Text = "KG: " .. tostring(computeKG(v))
-                    updateKGText(currentTool, computeKG(v))
-                end
-                numBox.Parent = nil
-            end)
+        -- apply instantly (from originals) then camera focus
+        applyInstantScale(tool, mult)
+        kgLabel.Text = "KG: " .. tostring(computeKG(tool, mult))
+        updateKGText(tool, computeKG(tool, mult))
+        if ENABLE_CAMERA_FOCUS then
+            focusCameraOnTool(tool, mult, CAMERA_FOCUS_TIME)
         end
     end)
 
     return gui
 end
 
--- create GUI now
-local gui = createGUI()
+-- create GUI
+local gui = makeGUI()
 
--- If tool changes, re-save originals and reset slider to 1x
+-- auto-detect loop to pre-save if equip
 task.spawn(function()
     while true do
-        pcall(function()
-            detectHeldTool()
-            if currentTool then
-                if not savedForTool[currentTool] then
-                    saveOriginals(currentTool)
-                    savedForTool[currentTool] = true
-                end
-                -- reset slider visually to 1x when new tool detected
-                -- find knob & sliderLabel in gui
-                local frame = gui:FindFirstChildOfClass("Frame") or gui:FindFirstChildWhichIsA("Frame")
-                if frame then
-                    local k = frame:FindFirstChildWhichIsA("ImageButton", true)
-                    local sl = frame:FindFirstChild("TextLabel")
-                end
-            end
-        end)
-        task.wait(0.9)
+        local t = detectHeldTool()
+        if t and not savedForTool[t] then
+            saveToolOriginals(t)
+        end
+        task.wait(0.7)
     end
 end)
 
--- end of script
+-- done
+print("Pet KG Showcase script loaded. Equip pet and use GUI (right-center).")
